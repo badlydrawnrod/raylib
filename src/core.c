@@ -410,9 +410,6 @@ typedef struct CoreData {
             int exitKey;                    // Default exit key
             char currentKeyState[512];      // Registers current frame key state
             char previousKeyState[512];     // Registers previous frame key state
-#if defined(PLATFORM_RPI) || defined(PLATFORM_DRM)
-            char changedKeyState[512];      // Registers keys whose state changed between frames
-#endif
             int keyPressedQueue[MAX_KEY_PRESSED_QUEUE];     // Input keys queue
             int keyPressedQueueCount;       // Input keys queue count
 
@@ -562,6 +559,7 @@ static void RestoreTerminal(void);                      // Restore terminal
 
 static void InitEvdevInput(void);                       // Evdev inputs initialization
 static void EventThreadSpawn(char *device);             // Identifies a input device and spawns a thread to handle it if needed
+static void PollEvDev(void);							// Polls evdev devices.
 static void *EventThread(void *arg);                    // Input device events reading thread
 
 static void InitGamepad(void);                          // Init raw gamepad input
@@ -2683,16 +2681,12 @@ void OpenURL(const char *url)
 // Detect if a key has been pressed once
 bool IsKeyPressed(int key)
 {
-#if defined(PLATFORM_RPI) || defined(PLATFORM_DRM)
-    return CORE.Input.Keyboard.changedKeyState[key] != 0 && CORE.Input.Keyboard.previousKeyState[key] == 1;
-#else
     bool pressed = false;
 
     if ((CORE.Input.Keyboard.previousKeyState[key] == 0) && (CORE.Input.Keyboard.currentKeyState[key] == 1)) pressed = true;
     else pressed = false;
 
     return pressed;
-#endif
 }
 
 // Detect if a key is being pressed (key held down)
@@ -2705,16 +2699,12 @@ bool IsKeyDown(int key)
 // Detect if a key has been released once
 bool IsKeyReleased(int key)
 {
-#if defined(PLATFORM_RPI) || defined(PLATFORM_DRM)
-    return CORE.Input.Keyboard.changedKeyState[key] != 0 && CORE.Input.Keyboard.previousKeyState[key] == 0;
-#else
     bool released = false;
 
     if ((CORE.Input.Keyboard.previousKeyState[key] == 1) && (CORE.Input.Keyboard.currentKeyState[key] == 0)) released = true;
     else released = false;
 
     return released;
-#endif
 }
 
 // Detect if a key is NOT being pressed (key not held down)
@@ -4235,11 +4225,9 @@ static void PollInputEvents(void)
 
 #if defined(PLATFORM_RPI) || defined(PLATFORM_DRM)
     // Register previous keys states and detect changes.
-    for (int i = 0; i < 512; i++)
-    {
-        CORE.Input.Keyboard.changedKeyState[i] = CORE.Input.Keyboard.previousKeyState[i] ^ CORE.Input.Keyboard.currentKeyState[i];
-        CORE.Input.Keyboard.previousKeyState[i] = CORE.Input.Keyboard.currentKeyState[i];
-    }
+    for (int i = 0; i < 512; i++) CORE.Input.Keyboard.previousKeyState[i] = CORE.Input.Keyboard.currentKeyState[i];
+
+    PollEvDev();
 
     // Grab a keypress from the evdev fifo if avalable
     if (CORE.Input.Keyboard.lastKeyPressed.head != CORE.Input.Keyboard.lastKeyPressed.tail)
@@ -5511,14 +5499,16 @@ static void EventThreadSpawn(char *device)
             worker->isGamepad? "gamepad " : "",
             worker->isKeyboard? "keyboard " : "");
 
+        worker->threadId = 1234;
+
         // Create a thread for this device
-        int error = pthread_create(&worker->threadId, NULL, &EventThread, (void *)worker);
-        if (error != 0)
-        {
-            TRACELOG(LOG_WARNING, "RPI: Failed to create input device thread: %s (error: %d)", device, error);
-            worker->threadId = 0;
-            close(fd);
-        }
+//        int error = pthread_create(&worker->threadId, NULL, &EventThread, (void *)worker);
+//        if (error != 0)
+//        {
+//            TRACELOG(LOG_WARNING, "RPI: Failed to create input device thread: %s (error: %d)", device, error);
+//            worker->threadId = 0;
+//            close(fd);
+//        }
 
 #if defined(USE_LAST_TOUCH_DEVICE)
         // Find touchscreen with the highest index
@@ -5537,7 +5527,7 @@ static void EventThreadSpawn(char *device)
                 if (CORE.Input.eventWorker[i].threadId != 0)
                 {
                     TRACELOG(LOG_WARNING, "RPI: Found duplicate touchscreen, killing touchscreen on event: %d", i);
-                    pthread_cancel(CORE.Input.eventWorker[i].threadId);
+//                    pthread_cancel(CORE.Input.eventWorker[i].threadId);
                     close(CORE.Input.eventWorker[i].fd);
                 }
             }
@@ -5546,6 +5536,226 @@ static void EventThreadSpawn(char *device)
     }
     else close(fd);  // We are not interested in this device
     //-------------------------------------------------------------------------------------------------------
+}
+
+static void PollEvDev(void)
+{
+	// Scancode to keycode mapping for US keyboards
+	// TODO: Probably replace this with a keymap from the X11 to get the correct regional map for the keyboard:
+	// Currently non US keyboards will have the wrong mapping for some keys
+	static const int keymap_US[] =
+			{ 0,256,49,50,51,52,53,54,55,56,57,48,45,61,259,258,81,87,69,82,84,
+			  89,85,73,79,80,91,93,257,341,65,83,68,70,71,72,74,75,76,59,39,96,
+			  340,92,90,88,67,86,66,78,77,44,46,47,344,332,342,32,280,290,291,
+			  292,293,294,295,296,297,298,299,282,281,327,328,329,333,324,325,
+			  326,334,321,322,323,320,330,0,85,86,300,301,89,90,91,92,93,94,95,
+			  335,345,331,283,346,101,268,265,266,263,262,269,264,267,260,261,
+			  112,113,114,115,116,117,118,119,120,121,122,123,124,125,347,127,
+			  128,129,130,131,132,133,134,135,136,137,138,139,140,141,142,143,
+			  144,145,146,147,148,149,150,151,152,153,154,155,156,157,158,159,
+			  160,161,162,163,164,165,166,167,168,169,170,171,172,173,174,175,
+			  176,177,178,179,180,181,182,183,184,185,186,187,188,189,190,191,
+			  192,193,194,0,0,0,0,0,200,201,202,203,204,205,206,207,208,209,210,
+			  211,212,213,214,215,216,217,218,219,220,221,222,223,224,225,226,
+			  227,228,229,230,231,232,233,234,235,236,237,238,239,240,241,242,
+			  243,244,245,246,247,248,0,0,0,0,0,0,0, };
+
+	struct input_event event;
+	for (int i = 0; i < sizeof(CORE.Input.eventWorker)/sizeof(InputEventWorker); ++i)
+	{
+		InputEventWorker *worker = &CORE.Input.eventWorker[i];
+		if (worker->threadId == 0) continue;
+
+		int touchAction = -1;
+		bool gestureUpdate = false;
+		int keycode;
+
+		// Try to read data from the device and only continue if successful
+		while (read(worker->fd, &event, sizeof(event)) == (int)sizeof(event))
+		{
+			// Relative movement parsing
+			if (event.type == EV_REL)
+			{
+				if (event.code == REL_X)
+				{
+					CORE.Input.Mouse.position.x += event.value;
+					CORE.Input.Touch.position[0].x = CORE.Input.Mouse.position.x;
+
+#if defined(SUPPORT_GESTURES_SYSTEM)
+					touchAction = TOUCH_MOVE;
+					gestureUpdate = true;
+#endif
+				}
+
+				if (event.code == REL_Y)
+				{
+					CORE.Input.Mouse.position.y += event.value;
+					CORE.Input.Touch.position[0].y = CORE.Input.Mouse.position.y;
+
+#if defined(SUPPORT_GESTURES_SYSTEM)
+					touchAction = TOUCH_MOVE;
+					gestureUpdate = true;
+#endif
+				}
+
+				if (event.code == REL_WHEEL) CORE.Input.Mouse.currentWheelMove += event.value;
+			}
+
+			// Absolute movement parsing
+			if (event.type == EV_ABS)
+			{
+				// Basic movement
+				if (event.code == ABS_X)
+				{
+					CORE.Input.Mouse.position.x = (event.value - worker->absRange.x) * CORE.Window.screen.width /
+												  worker->absRange.width;   // Scale acording to absRange
+
+#if defined(SUPPORT_GESTURES_SYSTEM)
+					touchAction = TOUCH_MOVE;
+					gestureUpdate = true;
+#endif
+				}
+
+				if (event.code == ABS_Y)
+				{
+					CORE.Input.Mouse.position.y = (event.value - worker->absRange.y) * CORE.Window.screen.height /
+												  worker->absRange.height; // Scale acording to absRange
+
+#if defined(SUPPORT_GESTURES_SYSTEM)
+					touchAction = TOUCH_MOVE;
+					gestureUpdate = true;
+#endif
+				}
+
+				// Multitouch movement
+				if (event.code == ABS_MT_SLOT)
+					worker->touchSlot = event.value;   // Remeber the slot number for the folowing events
+
+				if (event.code == ABS_MT_POSITION_X)
+				{
+					if (worker->touchSlot < MAX_TOUCH_POINTS)
+						CORE.Input.Touch.position[worker->touchSlot].x = (event.value - worker->absRange.x) *
+																		 CORE.Window.screen.width /
+																		 worker->absRange.width;    // Scale acording to absRange
+				}
+
+				if (event.code == ABS_MT_POSITION_Y)
+				{
+					if (worker->touchSlot < MAX_TOUCH_POINTS)
+						CORE.Input.Touch.position[worker->touchSlot].y = (event.value - worker->absRange.y) *
+																		 CORE.Window.screen.height /
+																		 worker->absRange.height;  // Scale acording to absRange
+				}
+
+				if (event.code == ABS_MT_TRACKING_ID)
+				{
+					if ((event.value < 0) && (worker->touchSlot < MAX_TOUCH_POINTS))
+					{
+						// Touch has ended for this point
+						CORE.Input.Touch.position[worker->touchSlot].x = -1;
+						CORE.Input.Touch.position[worker->touchSlot].y = -1;
+					}
+				}
+			}
+
+			// Button parsing
+			if (event.type == EV_KEY)
+			{
+				// Mouse button parsing
+				if ((event.code == BTN_TOUCH) || (event.code == BTN_LEFT))
+				{
+					CORE.Input.Mouse.currentButtonStateEvdev[MOUSE_LEFT_BUTTON] = event.value;
+
+#if defined(SUPPORT_GESTURES_SYSTEM)
+					if (event.value > 0) touchAction = TOUCH_DOWN;
+					else touchAction = TOUCH_UP;
+					gestureUpdate = true;
+#endif
+				}
+
+				if (event.code == BTN_RIGHT)
+					CORE.Input.Mouse.currentButtonStateEvdev[MOUSE_RIGHT_BUTTON] = event.value;
+				if (event.code == BTN_MIDDLE)
+					CORE.Input.Mouse.currentButtonStateEvdev[MOUSE_MIDDLE_BUTTON] = event.value;
+
+				// Keyboard button parsing
+				if ((event.code >= 1) && (event.code <= 255))     //Keyboard keys appear for codes 1 to 255
+				{
+					keycode = keymap_US[event.code &
+										0xFF];     // The code we get is a scancode so we look up the apropriate keycode
+
+					// Make sure we got a valid keycode
+					if ((keycode > 0) && (keycode < sizeof(CORE.Input.Keyboard.currentKeyState)))
+					{
+						// WARNING: https://www.kernel.org/doc/Documentation/input/input.txt
+						// Event interface: 'value' is the value the event carries. Either a relative change for EV_REL,
+						// absolute new value for EV_ABS (joysticks ...), or 0 for EV_KEY for release, 1 for keypress and 2 for autorepeat
+						CORE.Input.Keyboard.currentKeyState[keycode] = (event.value >= 1) ? 1 : 0;
+						if (event.value >= 1)
+						{
+							CORE.Input.Keyboard.keyPressedQueue[CORE.Input.Keyboard.keyPressedQueueCount] = keycode;     // Register last key pressed
+							CORE.Input.Keyboard.keyPressedQueueCount++;
+						}
+
+#if defined(SUPPORT_SCREEN_CAPTURE)
+						// Check screen capture key (raylib key: KEY_F12)
+						if (CORE.Input.Keyboard.currentKeyState[301] == 1)
+						{
+							TakeScreenshot(TextFormat("screenshot%03i.png", screenshotCounter));
+							screenshotCounter++;
+						}
+#endif
+
+						if (CORE.Input.Keyboard.currentKeyState[CORE.Input.Keyboard.exitKey] == 1)
+							CORE.Window.shouldClose = true;
+
+						TRACELOGD("RPI: KEY_%s ScanCode: %4i KeyCode: %4i", event.value == 0 ? "UP" : "DOWN",
+								event.code, keycode);
+					}
+				}
+			}
+
+			// Screen confinement
+			if (!CORE.Input.Mouse.cursorHidden)
+			{
+				if (CORE.Input.Mouse.position.x < 0) CORE.Input.Mouse.position.x = 0;
+				if (CORE.Input.Mouse.position.x > CORE.Window.screen.width / CORE.Input.Mouse.scale.x)
+					CORE.Input.Mouse.position.x = CORE.Window.screen.width / CORE.Input.Mouse.scale.x;
+
+				if (CORE.Input.Mouse.position.y < 0) CORE.Input.Mouse.position.y = 0;
+				if (CORE.Input.Mouse.position.y > CORE.Window.screen.height / CORE.Input.Mouse.scale.y)
+					CORE.Input.Mouse.position.y = CORE.Window.screen.height / CORE.Input.Mouse.scale.y;
+			}
+
+			// Gesture update
+			if (gestureUpdate)
+			{
+#if defined(SUPPORT_GESTURES_SYSTEM)
+				GestureEvent gestureEvent = { 0 };
+
+				gestureEvent.pointCount = 0;
+				gestureEvent.touchAction = touchAction;
+
+				if (CORE.Input.Touch.position[0].x >= 0) gestureEvent.pointCount++;
+				if (CORE.Input.Touch.position[1].x >= 0) gestureEvent.pointCount++;
+				if (CORE.Input.Touch.position[2].x >= 0) gestureEvent.pointCount++;
+				if (CORE.Input.Touch.position[3].x >= 0) gestureEvent.pointCount++;
+
+				gestureEvent.pointerId[0] = 0;
+				gestureEvent.pointerId[1] = 1;
+				gestureEvent.pointerId[2] = 2;
+				gestureEvent.pointerId[3] = 3;
+
+				gestureEvent.position[0] = CORE.Input.Touch.position[0];
+				gestureEvent.position[1] = CORE.Input.Touch.position[1];
+				gestureEvent.position[2] = CORE.Input.Touch.position[2];
+				gestureEvent.position[3] = CORE.Input.Touch.position[3];
+
+				ProcessGestureEvent(gestureEvent);
+#endif
+			}
+		}
+	}
 }
 
 // Input device events reading thread
