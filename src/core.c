@@ -5484,7 +5484,9 @@ static void ConfigureEvdevDevice(char *device)
     //-------------------------------------------------------------------------------------------------------
     if (worker->isKeyboard && CORE.Input.Keyboard.fd == -1)
     {
-        // It's a keyboard so it will be handled synchronously
+        // Use the first keyboard encountered. This assumes that a device that says it's a keyboard is just a
+        // keyboard. The keyboard is polled synchronously, whereas other input devices are polled in separate
+        // threads so that they don't drop events when the frame rate is slow.
         TRACELOG(LOG_INFO, "RPI: Opening keyboard device: %s", device);
         CORE.Input.Keyboard.fd = worker->fd;
     }
