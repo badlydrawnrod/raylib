@@ -333,12 +333,6 @@ typedef struct {
     bool isKeyboard;                // True if device has letter keycodes
     bool isGamepad;                 // True if device has gamepad buttons
 } InputEventWorker;
-
-typedef struct {
-    int contents[8];                // Key events FIFO contents (8 positions)
-    char head;                      // Key events FIFO head position
-    char tail;                      // Key events FIFO tail position
-} KeyEventFifo;
 #endif
 
 typedef struct { int x; int y; } Point;
@@ -405,7 +399,6 @@ typedef struct CoreData {
     struct {
 #if defined(PLATFORM_RPI) || defined(PLATFORM_DRM)
         InputEventWorker eventWorker[10];   // List of worker threads for every monitored "/dev/input/event<N>"
-        int evdevKeyboardFd;                // File descriptor for the evdev keyboard
 #endif
         struct {
             int exitKey;                    // Default exit key
@@ -421,7 +414,7 @@ typedef struct CoreData {
 #if defined(PLATFORM_RPI) || defined(PLATFORM_DRM)
             int defaultMode;                // Default keyboard mode
             struct termios defaultSettings; // Default keyboard settings
-            KeyEventFifo lastKeyPressed;    // Buffer for holding keydown events as they arrive (Needed due to multitreading of event workers)
+			int fd;            				// File descriptor for the evdev keyboard
 #endif
         } Keyboard;
         struct {
@@ -902,10 +895,10 @@ void CloseWindow(void)
     CORE.Window.shouldClose = true;   // Added to force threads to exit when the close window is called
 
     // Close the evdev keyboard
-    if (CORE.Input.evdevKeyboardFd != -1)
+    if (CORE.Input.Keyboard.fd != -1)
     {
-        close(CORE.Input.evdevKeyboardFd);
-        CORE.Input.evdevKeyboardFd = -1;
+        close(CORE.Input.Keyboard.fd);
+        CORE.Input.Keyboard.fd = -1;
     }
     
     for (int i = 0; i < sizeof(CORE.Input.eventWorker)/sizeof(InputEventWorker); ++i)
@@ -4239,15 +4232,6 @@ static void PollInputEvents(void)
     
     PollKeyboardEvents();
 
-    // Grab a keypress from the evdev fifo if avalable
-    if (CORE.Input.Keyboard.lastKeyPressed.head != CORE.Input.Keyboard.lastKeyPressed.tail)
-    {
-        CORE.Input.Keyboard.keyPressedQueue[CORE.Input.Keyboard.keyPressedQueueCount] = CORE.Input.Keyboard.lastKeyPressed.contents[CORE.Input.Keyboard.lastKeyPressed.tail];    // Read the key from the buffer
-        CORE.Input.Keyboard.keyPressedQueueCount++;
-
-        CORE.Input.Keyboard.lastKeyPressed.tail = (CORE.Input.Keyboard.lastKeyPressed.tail + 1) & 0x07;           // Increment the tail pointer forwards and binary wraparound after 7 (fifo is 8 elements long)
-    }
-
     // Register previous mouse states
     CORE.Input.Mouse.previousWheelMove = CORE.Input.Mouse.currentWheelMove;
     CORE.Input.Mouse.currentWheelMove = 0.0f;
@@ -5318,7 +5302,7 @@ static void InitEvdevInput(void)
     struct dirent *entity;
     
     // Initialise keyboard file descriptor
-    CORE.Input.evdevKeyboardFd = -1;
+    CORE.Input.Keyboard.fd = -1;
 
     // Reset variables
     for (int i = 0; i < MAX_TOUCH_POINTS; ++i)
@@ -5326,10 +5310,6 @@ static void InitEvdevInput(void)
         CORE.Input.Touch.position[i].x = -1;
         CORE.Input.Touch.position[i].y = -1;
     }
-
-    // Reset keypress buffer
-    CORE.Input.Keyboard.lastKeyPressed.head = 0;
-    CORE.Input.Keyboard.lastKeyPressed.tail = 0;
 
     // Reset keyboard key state
     for (int i = 0; i < 512; i++) CORE.Input.Keyboard.currentKeyState[i] = 0;
@@ -5507,7 +5487,7 @@ static void EventThreadSpawn(char *device)
         // It's a keyboard, so treat it differently.
         TRACELOG(LOG_INFO, "RPI: Opening keyboard device: %s", device);
         worker->threadId = 0; // Free the worker slot, as we won't be starting a thread for this.
-        CORE.Input.evdevKeyboardFd = worker->fd;
+        CORE.Input.Keyboard.fd = worker->fd;
     }
     else if (worker->isTouch || worker->isMouse)
     {
@@ -5578,7 +5558,7 @@ static void PollKeyboardEvents(void)
         227,228,229,230,231,232,233,234,235,236,237,238,239,240,241,242,
         243,244,245,246,247,248,0,0,0,0,0,0,0, };
 
-    int fd = CORE.Input.evdevKeyboardFd;
+    int fd = CORE.Input.Keyboard.fd;
     if (fd == -1) return;
 
     struct input_event event;
