@@ -405,6 +405,7 @@ typedef struct CoreData {
     struct {
 #if defined(PLATFORM_RPI) || defined(PLATFORM_DRM)
         InputEventWorker eventWorker[10];   // List of worker threads for every monitored "/dev/input/event<N>"
+        int evdevKeyboardFd;                // File descriptor for the evdev keyboard
 #endif
         struct {
             int exitKey;                    // Default exit key
@@ -560,6 +561,7 @@ static void RestoreTerminal(void);                      // Restore terminal
 
 static void InitEvdevInput(void);                       // Evdev inputs initialization
 static void EventThreadSpawn(char *device);             // Identifies a input device and spawns a thread to handle it if needed
+static void PollKeyboardEvents(void);                   // Process evdev keyboard events.
 static void *EventThread(void *arg);                    // Input device events reading thread
 
 static void InitGamepad(void);                          // Init raw gamepad input
@@ -899,6 +901,13 @@ void CloseWindow(void)
 
     CORE.Window.shouldClose = true;   // Added to force threads to exit when the close window is called
 
+    // Close the evdev keyboard
+    if (CORE.Input.evdevKeyboardFd != -1)
+    {
+        close(CORE.Input.evdevKeyboardFd);
+        CORE.Input.evdevKeyboardFd = -1;
+    }
+    
     for (int i = 0; i < sizeof(CORE.Input.eventWorker)/sizeof(InputEventWorker); ++i)
     {
         if (CORE.Input.eventWorker[i].threadId)
@@ -906,6 +915,7 @@ void CloseWindow(void)
             pthread_join(CORE.Input.eventWorker[i].threadId, NULL);
         }
     }
+    
 
     if (CORE.Input.Gamepad.threadId) pthread_join(CORE.Input.Gamepad.threadId, NULL);
 #endif
@@ -4226,6 +4236,8 @@ static void PollInputEvents(void)
 #if defined(PLATFORM_RPI) || defined(PLATFORM_DRM)
     // Register previous keys states
     for (int i = 0; i < 512; i++) CORE.Input.Keyboard.previousKeyState[i] = CORE.Input.Keyboard.currentKeyState[i];
+    
+    PollKeyboardEvents();
 
     // Grab a keypress from the evdev fifo if avalable
     if (CORE.Input.Keyboard.lastKeyPressed.head != CORE.Input.Keyboard.lastKeyPressed.tail)
@@ -5304,6 +5316,9 @@ static void InitEvdevInput(void)
     char path[MAX_FILEPATH_LENGTH];
     DIR *directory;
     struct dirent *entity;
+    
+    // Initialise keyboard file descriptor
+    CORE.Input.evdevKeyboardFd = -1;
 
     // Reset variables
     for (int i = 0; i < MAX_TOUCH_POINTS; ++i)
@@ -5487,7 +5502,14 @@ static void EventThreadSpawn(char *device)
 
     // Decide what to do with the device
     //-------------------------------------------------------------------------------------------------------
-    if (worker->isTouch || worker->isMouse || worker->isKeyboard)
+    if (worker->isKeyboard)
+    {
+        // It's a keyboard, so treat it differently.
+        TRACELOG(LOG_INFO, "RPI: Opening keyboard device: %s", device);
+        worker->threadId = 0; // Free the worker slot, as we won't be starting a thread for this.
+        CORE.Input.evdevKeyboardFd = worker->fd;
+    }
+    else if (worker->isTouch || worker->isMouse)
     {
         // Looks like an interesting device
         TRACELOG(LOG_INFO, "RPI: Opening input device: %s (%s%s%s%s%s)", device,
@@ -5534,8 +5556,7 @@ static void EventThreadSpawn(char *device)
     //-------------------------------------------------------------------------------------------------------
 }
 
-// Input device events reading thread
-static void *EventThread(void *arg)
+static void PollKeyboardEvents(void)
 {
     // Scancode to keycode mapping for US keyboards
     // TODO: Probably replace this with a keymap from the X11 to get the correct regional map for the keyboard:
@@ -5557,6 +5578,57 @@ static void *EventThread(void *arg)
         227,228,229,230,231,232,233,234,235,236,237,238,239,240,241,242,
         243,244,245,246,247,248,0,0,0,0,0,0,0, };
 
+    int fd = CORE.Input.evdevKeyboardFd;
+    if (fd == -1) return;
+
+    struct input_event event;
+    int keycode;
+    
+    // Try to read data from the keyboard and only continue if successful
+    while (read(fd, &event, sizeof(event)) == (int)sizeof(event))
+    {
+        // Button parsing
+        if (event.type == EV_KEY)
+        {
+            // Keyboard button parsing
+            if ((event.code >= 1) && (event.code <= 255))     //Keyboard keys appear for codes 1 to 255
+            {
+                keycode = keymap_US[event.code & 0xFF];     // The code we get is a scancode so we look up the apropriate keycode
+
+                // Make sure we got a valid keycode
+                if ((keycode > 0) && (keycode < sizeof(CORE.Input.Keyboard.currentKeyState)))
+                {
+                    // WARNING: https://www.kernel.org/doc/Documentation/input/input.txt
+                    // Event interface: 'value' is the value the event carries. Either a relative change for EV_REL,
+                    // absolute new value for EV_ABS (joysticks ...), or 0 for EV_KEY for release, 1 for keypress and 2 for autorepeat
+                    CORE.Input.Keyboard.currentKeyState[keycode] = (event.value >= 1)? 1 : 0;
+                    if (event.value >= 1)
+                    {
+                        CORE.Input.Keyboard.keyPressedQueue[CORE.Input.Keyboard.keyPressedQueueCount] = keycode;     // Register last key pressed
+                        CORE.Input.Keyboard.keyPressedQueueCount++;
+                    }
+
+                    #if defined(SUPPORT_SCREEN_CAPTURE)
+                        // Check screen capture key (raylib key: KEY_F12)
+                        if (CORE.Input.Keyboard.currentKeyState[301] == 1)
+                        {
+                            TakeScreenshot(TextFormat("screenshot%03i.png", screenshotCounter));
+                            screenshotCounter++;
+                        }
+                    #endif
+
+                    if (CORE.Input.Keyboard.currentKeyState[CORE.Input.Keyboard.exitKey] == 1) CORE.Window.shouldClose = true;
+
+                    TRACELOGD("RPI: KEY_%s ScanCode: %4i KeyCode: %4i", event.value == 0 ? "UP":"DOWN", event.code, keycode);
+                }
+            }
+        }
+    }
+}
+
+// Input device events reading thread
+static void *EventThread(void *arg)
+{
     struct input_event event;
     InputEventWorker *worker = (InputEventWorker *)arg;
 
@@ -5662,39 +5734,6 @@ static void *EventThread(void *arg)
 
                 if (event.code == BTN_RIGHT) CORE.Input.Mouse.currentButtonStateEvdev[MOUSE_RIGHT_BUTTON] = event.value;
                 if (event.code == BTN_MIDDLE) CORE.Input.Mouse.currentButtonStateEvdev[MOUSE_MIDDLE_BUTTON] = event.value;
-
-                // Keyboard button parsing
-                if ((event.code >= 1) && (event.code <= 255))     //Keyboard keys appear for codes 1 to 255
-                {
-                    keycode = keymap_US[event.code & 0xFF];     // The code we get is a scancode so we look up the apropriate keycode
-
-                    // Make sure we got a valid keycode
-                    if ((keycode > 0) && (keycode < sizeof(CORE.Input.Keyboard.currentKeyState)))
-                    {
-                        // WARNING: https://www.kernel.org/doc/Documentation/input/input.txt
-                        // Event interface: 'value' is the value the event carries. Either a relative change for EV_REL,
-                        // absolute new value for EV_ABS (joysticks ...), or 0 for EV_KEY for release, 1 for keypress and 2 for autorepeat
-                        CORE.Input.Keyboard.currentKeyState[keycode] = (event.value >= 1)? 1 : 0;
-                        if (event.value >= 1)
-                        {
-                            CORE.Input.Keyboard.keyPressedQueue[CORE.Input.Keyboard.keyPressedQueueCount] = keycode;     // Register last key pressed
-                            CORE.Input.Keyboard.keyPressedQueueCount++;
-                        }
-
-                        #if defined(SUPPORT_SCREEN_CAPTURE)
-                            // Check screen capture key (raylib key: KEY_F12)
-                            if (CORE.Input.Keyboard.currentKeyState[301] == 1)
-                            {
-                                TakeScreenshot(TextFormat("screenshot%03i.png", screenshotCounter));
-                                screenshotCounter++;
-                            }
-                        #endif
-
-                        if (CORE.Input.Keyboard.currentKeyState[CORE.Input.Keyboard.exitKey] == 1) CORE.Window.shouldClose = true;
-
-                        TRACELOGD("RPI: KEY_%s ScanCode: %4i KeyCode: %4i", event.value == 0 ? "UP":"DOWN", event.code, keycode);
-                    }
-                }
             }
 
             // Screen confinement
