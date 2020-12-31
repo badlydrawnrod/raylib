@@ -553,7 +553,7 @@ static void RestoreTerminal(void);                      // Restore terminal
 #endif
 
 static void InitEvdevInput(void);                       // Evdev inputs initialization
-static void EventThreadSpawn(char *device);             // Identifies a input device and spawns a thread to handle it if needed
+static void ConfigureEvdevDevice(char *device);         // Identifies a input device and configures it for use if appropriate
 static void PollKeyboardEvents(void);                   // Process evdev keyboard events.
 static void *EventThread(void *arg);                    // Input device events reading thread
 
@@ -5324,7 +5324,7 @@ static void InitEvdevInput(void)
             if (strncmp("event", entity->d_name, strlen("event")) == 0)         // Search for devices named "event*"
             {
                 sprintf(path, "%s%s", DEFAULT_EVDEV_PATH, entity->d_name);
-                EventThreadSpawn(path);                                         // Identify the device and spawn a thread for it
+                ConfigureEvdevDevice(path);                                     // Configure the device if appropriate
             }
         }
 
@@ -5333,8 +5333,8 @@ static void InitEvdevInput(void)
     else TRACELOG(LOG_WARNING, "RPI: Failed to open linux event directory: %s", DEFAULT_EVDEV_PATH);
 }
 
-// Identifies a input device and spawns a thread to handle it if needed
-static void EventThreadSpawn(char *device)
+// Identifies a input device and configures it for use if appropriate
+static void ConfigureEvdevDevice(char *device)
 {
     #define BITS_PER_LONG   (8*sizeof(long))
     #define NBITS(x)        ((((x) - 1)/BITS_PER_LONG) + 1)
@@ -5406,7 +5406,7 @@ static void EventThreadSpawn(char *device)
 
     // Identify the device
     //-------------------------------------------------------------------------------------------------------
-    ioctl(fd, EVIOCGBIT(0, sizeof(evBits)), evBits);    // Read a bitfield of the avalable device properties
+    ioctl(fd, EVIOCGBIT(0, sizeof(evBits)), evBits);    // Read a bitfield of the available device properties
 
     // Check for absolute input devices
     if (TEST_BIT(evBits, EV_ABS))
@@ -5482,22 +5482,20 @@ static void EventThreadSpawn(char *device)
 
     // Decide what to do with the device
     //-------------------------------------------------------------------------------------------------------
-    if (worker->isKeyboard)
+    if (worker->isKeyboard && CORE.Input.Keyboard.fd == -1)
     {
-        // It's a keyboard, so treat it differently.
+        // It's a keyboard so it will be handled synchronously
         TRACELOG(LOG_INFO, "RPI: Opening keyboard device: %s", device);
-        worker->threadId = 0; // Free the worker slot, as we won't be starting a thread for this.
         CORE.Input.Keyboard.fd = worker->fd;
     }
     else if (worker->isTouch || worker->isMouse)
     {
         // Looks like an interesting device
-        TRACELOG(LOG_INFO, "RPI: Opening input device: %s (%s%s%s%s%s)", device,
+        TRACELOG(LOG_INFO, "RPI: Opening input device: %s (%s%s%s%s)", device,
             worker->isMouse? "mouse " : "",
             worker->isMultitouch? "multitouch " : "",
             worker->isTouch? "touchscreen " : "",
-            worker->isGamepad? "gamepad " : "",
-            worker->isKeyboard? "keyboard " : "");
+            worker->isGamepad? "gamepad " : "");
 
         // Create a thread for this device
         int error = pthread_create(&worker->threadId, NULL, &EventThread, (void *)worker);
@@ -5517,7 +5515,7 @@ static void EventThreadSpawn(char *device)
             if (CORE.Input.eventWorker[i].isTouch && (CORE.Input.eventWorker[i].eventNum > maxTouchNumber)) maxTouchNumber = CORE.Input.eventWorker[i].eventNum;
         }
 
-        // Find toucnscreens with lower indexes
+        // Find touchscreens with lower indexes
         for (int i = 0; i < sizeof(CORE.Input.eventWorker)/sizeof(InputEventWorker); ++i)
         {
             if (CORE.Input.eventWorker[i].isTouch && (CORE.Input.eventWorker[i].eventNum < maxTouchNumber))
@@ -5614,7 +5612,6 @@ static void *EventThread(void *arg)
 
     int touchAction = -1;
     bool gestureUpdate = false;
-    int keycode;
 
     while (!CORE.Window.shouldClose)
     {
